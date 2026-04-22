@@ -103,7 +103,7 @@ def calculate_score(row):
     if row['Drawdown'] < -20:
         score += 2
 
-    payout = row['Payout'] / 100 if row['Payout'] else 0
+    payout = (row['Payout'] / 100) if row['Payout'] else 0
     if payout > 0.9:
         score -= 5
     elif payout > 0.75:
@@ -131,8 +131,19 @@ if df.empty:
     st.error("No se pudieron cargar datos.")
     st.stop()
 
+# Score
 df['Score'] = df.apply(calculate_score, axis=1)
+
+# Limpiar NaN
+df["Score"] = df["Score"].fillna(0)
+
 df = df.sort_values("Score", ascending=False)
+
+# =========================
+# CONFIG PROGRESS COLUMN (FIX)
+# =========================
+score_min = int(df["Score"].min())
+score_max = int(df["Score"].max())
 
 # =========================
 # TOP
@@ -145,8 +156,8 @@ st.dataframe(
     column_config={
         "Score": st.column_config.ProgressColumn(
             "Score",
-            min_value=df["Score"].min(),
-            max_value=df["Score"].max(),
+            min_value=score_min,
+            max_value=score_max,
         )
     }
 )
@@ -164,8 +175,8 @@ sector_sel = st.sidebar.multiselect(
 
 min_score = st.sidebar.slider(
     "Score mínimo",
-    int(df["Score"].min()),
-    int(df["Score"].max()),
+    int(score_min),
+    int(score_max),
     5
 )
 

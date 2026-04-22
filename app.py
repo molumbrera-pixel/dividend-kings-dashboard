@@ -130,3 +130,7 @@ if ticker:
     col2.metric("Hist Yield", f"{d['yield_hist']:.2f}%" if d["yield_hist"] else "N/A")
     col3.metric("Drawdown", f"{d['drawdown']:.2f}%")
     col4.metric("Score", score_stock(d))
+DIVIDEND_KINGS = [
+    "KO", "JNJ", "PG", "PEP", "MCD",
+    "LOW", "CL", "MMM", "ABBV", "TGT"
+]

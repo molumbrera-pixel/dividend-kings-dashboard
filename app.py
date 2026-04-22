@@ -1,53 +1,71 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
 st.title("📊 Dividend Kings PRO Dashboard")
 
+# =========================
+# DATA FUNCTION
+# =========================
 @st.cache_data
 def get_data(ticker):
-    stock = yf.Ticker(ticker)
-    hist = stock.history(period="10y")
-    info = stock.info
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="10y")
+        info = stock.info
 
-    if hist.empty:
+        if hist.empty:
+            return None
+
+        price = hist["Close"].iloc[-1]
+        low_52 = hist["Close"].rolling(252).min().iloc[-1]
+        high_all = hist["Close"].max()
+
+        dividend_yield = info.get("dividendYield", 0)
+        pe = info.get("trailingPE", None)
+        payout = info.get("payoutRatio", None)
+
+        # Métricas calculadas
+        distance_low = (price - low_52) / low_52 * 100 if low_52 else 0
+        drawdown = (price - high_all) / high_all * 100 if high_all else 0
+
+        # =========================
+        # DIVIDENDOS (FIX ERROR)
+        # =========================
+        dividends = stock.dividends
+
+        if dividends is None or dividends.empty:
+            yield_hist = None
+        else:
+            dividends.index = pd.to_datetime(dividends.index, errors="coerce")
+            dividends = dividends.dropna()
+
+            if len(dividends) > 5:
+                yearly = dividends.resample("YE").sum()  # ✅ FIX
+                yield_hist = yearly.mean() / price
+            else:
+                yield_hist = None
+
+        return {
+            "hist": hist,
+            "price": price,
+            "yield": dividend_yield * 100 if dividend_yield else 0,
+            "yield_hist": yield_hist * 100 if yield_hist else None,
+            "pe": pe,
+            "payout": payout,
+            "distance_low": distance_low,
+            "drawdown": drawdown
+        }
+
+    except Exception:
         return None
 
-    price = hist["Close"].iloc[-1]
-    low_52 = hist["Close"].rolling(252).min().iloc[-1]
-    high_all = hist["Close"].max()
 
-    dividend_yield = info.get("dividendYield", 0)
-    pe = info.get("trailingPE", None)
-    payout = info.get("payoutRatio", None)
-
-    # Métricas calculadas
-    distance_low = (price - low_52) / low_52 * 100 if low_52 else 0
-    drawdown = (price - high_all) / high_all * 100 if high_all else 0
-
-    # Yield histórico aproximado
-    dividends = stock.dividends
-    if len(dividends) > 5:
-        yearly = dividends.resample("Y").sum()
-        yield_hist = yearly.mean() / price
-    else:
-        yield_hist = None
-
-    return {
-        "hist": hist,
-        "price": price,
-        "yield": dividend_yield * 100 if dividend_yield else 0,
-        "yield_hist": yield_hist * 100 if yield_hist else None,
-        "pe": pe,
-        "payout": payout,
-        "distance_low": distance_low,
-        "drawdown": drawdown
-    }
-
-# Scoring inteligente
+# =========================
+# SCORING
+# =========================
 def score_stock(d):
     score = 0
 
@@ -74,38 +92,61 @@ def score_stock(d):
     else:
         return "❌ Risk"
 
-# Cargar datos
+
+# =========================
+# TICKERS
+# =========================
 DIVIDEND_KINGS = [
     "KO", "JNJ", "PG", "PEP", "MCD",
     "LOW", "CL", "MMM", "ABBV", "TGT"
 ]
-data = {}
-for ticker in DIVIDEND_KINGS:
-    data[ticker] = get_data(ticker)
 
+# =========================
+# LOAD DATA (ROBUSTO)
+# =========================
+data = {}
+
+for ticker in DIVIDEND_KINGS:
+    result = get_data(ticker)
+    if result:
+        data[ticker] = result
+
+# =========================
+# DATAFRAME
+# =========================
 rows = []
+
 for ticker, d in data.items():
-    if d:
-        rows.append({
-            "Ticker": ticker,
-            "Price": d["price"],
-            "Yield (%)": d["yield"],
-            "Hist Yield (%)": d["yield_hist"],
-            "P/E": d["pe"],
-            "Payout": d["payout"],
-            "Dist 52W Low (%)": d["distance_low"],
-            "Drawdown (%)": d["drawdown"],
-            "Score": score_stock(d)
-        })
+    rows.append({
+        "Ticker": ticker,
+        "Price": d["price"],
+        "Yield (%)": d["yield"],
+        "Hist Yield (%)": d["yield_hist"],
+        "P/E": d["pe"],
+        "Payout": d["payout"],
+        "Dist 52W Low (%)": d["distance_low"],
+        "Drawdown (%)": d["drawdown"],
+        "Score": score_stock(d)
+    })
 
 df = pd.DataFrame(rows)
 
-# Sidebar filtros
+if df.empty:
+    st.error("No se pudieron cargar datos. Revisa conexión o tickers.")
+    st.stop()
+
+# =========================
+# SIDEBAR FILTROS
+# =========================
 st.sidebar.header("🔎 Filtros")
 
 min_yield = st.sidebar.slider("Min Yield", 0.0, 10.0, 2.0)
 max_distance = st.sidebar.slider("Max distancia a mínimo", 0.0, 100.0, 50.0)
-score_filter = st.sidebar.multiselect("Score", df["Score"].unique(), default=df["Score"].unique())
+score_filter = st.sidebar.multiselect(
+    "Score",
+    df["Score"].unique(),
+    default=df["Score"].unique()
+)
 
 filtered = df[
     (df["Yield (%)"] >= min_yield) &
@@ -115,26 +156,36 @@ filtered = df[
 
 st.dataframe(filtered, use_container_width=True)
 
-# Selección
-ticker = st.selectbox("Selecciona acción", filtered["Ticker"])
+# =========================
+# SELECCIÓN
+# =========================
+if not filtered.empty:
+    ticker = st.selectbox("Selecciona acción", filtered["Ticker"])
 
-if ticker:
-    d = data[ticker]
-    hist = d["hist"]
+    if ticker:
+        d = data[ticker]
+        hist = d["hist"]
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], name="Precio"))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=hist.index,
+            y=hist["Close"],
+            name="Precio"
+        ))
 
-    fig.update_layout(title=f"{ticker} Precio histórico", template="plotly_white")
+        fig.update_layout(
+            title=f"{ticker} Precio histórico",
+            template="plotly_white"
+        )
 
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Yield", f"{d['yield']:.2f}%")
-    col2.metric("Hist Yield", f"{d['yield_hist']:.2f}%" if d["yield_hist"] else "N/A")
-    col3.metric("Drawdown", f"{d['drawdown']:.2f}%")
-    col4.metric("Score", score_stock(d))
-DIVIDEND_KINGS = [
-    "KO", "JNJ", "PG", "PEP", "MCD",
-    "LOW", "CL", "MMM", "ABBV", "TGT"
-]
+        col1, col2, col3, col4 = st.columns(4)
+
+        col1.metric("Yield", f"{d['yield']:.2f}%")
+        col2.metric(
+            "Hist Yield",
+            f"{d['yield_hist']:.2f}%" if d["yield_hist"] else "N/A"
+        )
+        col3.metric("Drawdown", f"{d['drawdown']:.2f}%")
+        col4.metric("Score", score_stock(d))

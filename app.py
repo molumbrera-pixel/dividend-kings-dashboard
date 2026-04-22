@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.express as px
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Dividend Kings PRO")
 
@@ -31,6 +32,7 @@ def fetch_ticker_data(ticker):
 
         price = hist["Close"].iloc[-1]
 
+        # Mejor señal con Close
         low_52 = hist["Close"].rolling(252).min().iloc[-1]
         high_all = hist["Close"].max()
 
@@ -38,12 +40,24 @@ def fetch_ticker_data(ticker):
         payout = info.get("payoutRatio")
         sector = info.get("sector", "N/A")
 
+        # 🔥 FALLBACK PAYOUT
+        if payout is None:
+            eps = info.get("trailingEps")
+            div_rate = info.get("dividendRate")
+            if eps and eps > 0 and div_rate:
+                payout = div_rate / eps
+
+        # Normalizar payout (0–1)
+        if payout and payout > 1:
+            payout = payout / 100
+
         distance_low = (price - low_52) / low_52 * 100 if low_52 else 0
         drawdown = (price - high_all) / high_all * 100 if high_all else 0
 
         dividends = stock.dividends
         yield_value = 0
         yield_hist = None
+        margin_safety = None
 
         if dividends is not None and not dividends.empty:
             dividends.index = pd.to_datetime(dividends.index, errors="coerce")
@@ -57,12 +71,17 @@ def fetch_ticker_data(ticker):
                 avg_price = hist["Close"].mean()
                 yield_hist = (yearly.mean() / avg_price) * 100
 
+        # 🔥 MARGIN OF SAFETY
+        if yield_hist and yield_value:
+            margin_safety = yield_value / yield_hist
+
         return {
             "Ticker": ticker,
             "Sector": sector,
             "Price": round(price, 2),
             "Yield": round(yield_value, 2),
             "Yield_Hist": round(yield_hist, 2) if yield_hist else None,
+            "Margin_Safety": round(margin_safety, 2) if margin_safety else None,
             "PE": pe,
             "Payout": payout,
             "Dist_Low": round(distance_low, 1),
@@ -70,7 +89,7 @@ def fetch_ticker_data(ticker):
             "hist_df": hist
         }
 
-    except:
+    except Exception:
         return None
 
 
@@ -81,28 +100,37 @@ def get_all_data(tickers):
     return [r for r in results if r is not None]
 
 # =========================
-# SCORE
+# SCORE AVANZADO
 # =========================
 def calculate_score(row):
     score = 0
 
+    # Margin of Safety (clave)
+    if row["Margin_Safety"]:
+        if row["Margin_Safety"] > 1.3:
+            score += 4
+        elif row["Margin_Safety"] > 1.1:
+            score += 2
+
+    # Yield relativo
     if row['Yield'] and row['Yield_Hist']:
         ratio = row['Yield'] / row['Yield_Hist']
         if ratio > 1.2:
-            score += 4
-        elif ratio > 1:
             score += 2
 
+    # Caída inteligente
     if row['Drawdown'] < -30:
         if row['Yield'] > 2:
             score += 3
         else:
             score -= 2
 
+    # Cercanía a mínimos
     if row['Dist_Low'] < 10:
         score += 2
 
-    pe = row['PE'] if row['PE'] else 100
+    # Valuación (fix bug None)
+    pe = row['PE'] if row['PE'] is not None else 100
     if pe < 12:
         score += 3
     elif pe < 18:
@@ -110,15 +138,18 @@ def calculate_score(row):
     elif pe > 35:
         score -= 3
 
+    # Payout
     payout = row['Payout'] if row['Payout'] else 0
     if payout > 0.9:
         score -= 5
     elif payout > 0.75:
         score -= 2
 
+    # Yield extremo
     if row['Yield'] > 6:
         score -= 2
 
+    # Deterioro
     if row['Yield_Hist'] and row['Yield'] < row['Yield_Hist'] * 0.7:
         score -= 2
 
@@ -144,7 +175,7 @@ df = df.sort_values("Score", ascending=False)
 
 display_cols = [
     "Ticker","Sector","Price","Yield","Yield_Hist",
-    "PE","Payout","Dist_Low","Drawdown","Score"
+    "Margin_Safety","PE","Payout","Dist_Low","Drawdown","Score"
 ]
 
 # =========================
@@ -168,9 +199,9 @@ filtered = df[
 ].sort_values("Score", ascending=False)
 
 # =========================
-# SIDEBAR - SECTORES
+# SECTORES
 # =========================
-st.sidebar.subheader("📊 Distribución por Sector")
+st.sidebar.subheader("📊 Distribución Sector")
 
 if not filtered.empty:
     sector_counts = filtered["Sector"].value_counts()
@@ -186,8 +217,11 @@ st.dataframe(filtered[display_cols], use_container_width=True)
 # =========================
 # EXPORT CSV
 # =========================
-csv = filtered.to_csv(index=False).encode('utf-8')
-st.download_button("📥 Descargar CSV", csv, "dividend_kings.csv", "text/csv")
+today = datetime.now().strftime("%Y-%m-%d")
+filename = f"dividend_kings_{today}.csv"
+
+csv = filtered.to_csv(index=False).encode("utf-8")
+st.download_button("📥 Descargar CSV", csv, filename, "text/csv")
 
 # =========================
 # TOP 5
@@ -197,7 +231,7 @@ if not filtered.empty:
     st.success(f"🚀 Top 5: {', '.join(top5['Ticker'].tolist())}")
 
     for _, row in top5.iterrows():
-        st.write(f"{row['Ticker']} → Score: {row['Score']} | Yield: {row['Yield']}%")
+        st.write(f"{row['Ticker']} → Score: {row['Score']} | Yield: {row['Yield']}% | MOS: {row['Margin_Safety']}")
 
 # =========================
 # SCATTER
@@ -248,6 +282,7 @@ if not filtered.empty:
                 st.metric("Yield vs Hist", f"{data['Yield_Hist']:.2f}%", f"{delta:.2f}%")
 
             st.write(f"Payout: {data['Payout']:.1%}" if data["Payout"] else "N/A")
+            st.write(f"Margin Safety: {data['Margin_Safety']}")
             st.write(f"Sector: {data['Sector']}")
 
         with col2:

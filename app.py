@@ -18,7 +18,7 @@ DIVIDEND_KINGS = [
 ]
 
 # =========================
-# FETCH DATA (PARALELO)
+# FETCH DATA
 # =========================
 def fetch_ticker_data(ticker):
     try:
@@ -51,27 +51,27 @@ def fetch_ticker_data(ticker):
             dividends.index = pd.to_datetime(dividends.index, errors="coerce")
             dividends = dividends.dropna()
 
-            # Últimos 12 meses
-            last_year_divs = dividends[dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))].sum()
-            if price > 0:
-                yield_value = (last_year_divs / price) * 100
+            last_year = dividends[dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))]
+            total_div = last_year.sum()
 
-            # Histórico corregido
-            yearly_divs = dividends.resample("YE").sum()
-            if len(yearly_divs) > 1:
+            if price > 0:
+                yield_value = (total_div / price) * 100
+
+            yearly = dividends.resample("YE").sum()
+            if len(yearly) > 1:
                 avg_price = hist["Close"].mean()
-                yield_hist = (yearly_divs.mean() / avg_price) * 100
+                yield_hist = (yearly.mean() / avg_price) * 100
 
         return {
             "Ticker": ticker,
             "Sector": sector,
-            "Price": price,
-            "Yield": yield_value,
-            "Yield_Hist": yield_hist,
-            "PE": pe,
-            "Payout": payout,
-            "Dist_Low": distance_low,
-            "Drawdown": drawdown,
+            "Price": round(price, 2),
+            "Yield": round(yield_value, 2),
+            "Yield_Hist": round(yield_hist, 2) if yield_hist else None,
+            "PE": round(pe, 1) if pe else None,
+            "Payout": round(payout * 100, 1) if payout else None,
+            "Dist_Low": round(distance_low, 1),
+            "Drawdown": round(drawdown, 1),
             "hist_df": hist
         }
 
@@ -91,28 +91,25 @@ def get_all_data(tickers):
 def calculate_score(row):
     score = 0
 
-    # Yield vs histórico
     if row['Yield'] and row['Yield_Hist']:
         if row['Yield'] > row['Yield_Hist'] * 1.1:
             score += 4
         elif row['Yield'] > row['Yield_Hist']:
             score += 2
 
-    # Precio
     if row['Dist_Low'] < 10:
         score += 3
+
     if row['Drawdown'] < -20:
         score += 2
 
-    # Riesgo
-    payout = row['Payout'] or 0
+    payout = row['Payout'] / 100 if row['Payout'] else 0
     if payout > 0.9:
         score -= 5
     elif payout > 0.75:
         score -= 2
 
-    # Valuación
-    pe = row['PE'] or 100
+    pe = row['PE'] if row['PE'] else 100
     if pe < 15:
         score += 3
     elif pe > 30:
@@ -138,21 +135,21 @@ df['Score'] = df.apply(calculate_score, axis=1)
 df = df.sort_values("Score", ascending=False)
 
 # =========================
-# FORMATO
+# TOP
 # =========================
-def style_df(df_to_style):
-    return df_to_style.style.format({
-        "Price": "${:.2f}",
-        "Yield": "{:.2f}%",
-        "Yield_Hist": "{:.2f}%",
-        "PE": "{:.1f}",
-        "Payout": "{:.1%}",
-        "Dist_Low": "{:.1f}%",
-        "Drawdown": "{:.1f}%"
-    }).background_gradient(subset=["Score"], cmap="RdYlGn")
-
 st.subheader("🏆 Top Oportunidades")
-st.dataframe(style_df(df.head(10)), use_container_width=True)
+
+st.dataframe(
+    df.head(10),
+    use_container_width=True,
+    column_config={
+        "Score": st.column_config.ProgressColumn(
+            "Score",
+            min_value=df["Score"].min(),
+            max_value=df["Score"].max(),
+        )
+    }
+)
 
 # =========================
 # FILTROS
@@ -216,8 +213,7 @@ if not filtered.empty:
                 delta = data["Yield"] - data["Yield_Hist"]
                 st.metric("Yield vs Hist", f"{data['Yield_Hist']:.2f}%", f"{delta:.2f}%")
 
-            payout = data["Payout"]
-            st.write(f"Payout: {payout:.1%}" if payout else "Payout: N/A")
+            st.write(f"Payout: {data['Payout']:.1f}%" if data["Payout"] else "Payout: N/A")
             st.write(f"Sector: {data['Sector']}")
 
         with col2:

@@ -4,12 +4,10 @@ import pandas as pd
 import plotly.express as px
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import math
 
 st.set_page_config(layout="wide", page_title="Dividend Kings PRO")
 
-# =========================
-# LISTA
-# =========================
 DIVIDEND_KINGS = [
     "AWR","ABM","ABBV","ALB","AOS","APD","ATO","BDX","BF-B","CAH",
     "CAT","CL","CINF","CLX","CMS","CVX","DOV","ED","EMR","FRT",
@@ -65,11 +63,18 @@ def fetch_ticker_data(ticker):
             yield_value = (last_year.sum() / price) * 100 if price > 0 else 0
 
             yearly = dividends.resample("YE").sum()
+
             if len(yearly) > 1:
                 avg_price = hist["Close"].mean()
                 yield_hist = (yearly.mean() / avg_price) * 100
 
-        if yield_hist and yield_value:
+        # 🔥 FIX REAL MOS
+        if (
+            yield_hist is not None and 
+            yield_value is not None and 
+            yield_hist > 0 and 
+            not math.isnan(yield_hist)
+        ):
             margin_safety = yield_value / yield_hist
 
         return {
@@ -111,27 +116,11 @@ def normalize_data(df):
 
     return df
 
-
 def clean_data(df):
     df = df[df["Price"] > 0]
     df = df[df["PE"] < 150]
     df = df[df["Yield"] < 20]
     return df
-
-
-def validate_data(df):
-    issues = []
-
-    if df["Price"].isna().sum() > 0:
-        issues.append("⚠️ Hay precios faltantes")
-
-    if df["Yield"].max() > 15:
-        issues.append("⚠️ Yield anormal detectado")
-
-    if df["PE"].max() > 200:
-        issues.append("⚠️ P/E extremo detectado")
-
-    return issues
 
 # =========================
 # SCORE
@@ -140,7 +129,7 @@ def calculate_score(row):
     score = 0
 
     mos = row.get("Margin_Safety")
-    if mos:
+    if mos and not math.isnan(mos):
         if mos > 1.3:
             score += 4
         elif mos > 1.1:
@@ -190,136 +179,34 @@ def calculate_score(row):
 # =========================
 st.title("📊 Dividend Kings PRO Dashboard")
 
-with st.spinner("Cargando datos..."):
-    raw_data = get_all_data(DIVIDEND_KINGS)
-
+raw_data = get_all_data(DIVIDEND_KINGS)
 df = pd.DataFrame(raw_data)
 
-if df.empty:
-    st.error("No se pudieron cargar datos.")
-    st.stop()
-
-# pipeline
 df = normalize_data(df)
 df = clean_data(df)
-
-issues = validate_data(df)
-for issue in issues:
-    st.warning(issue)
 
 df["Score"] = df.apply(calculate_score, axis=1)
 df = df.sort_values("Score", ascending=False)
 
+# =========================
+# UI
+# =========================
 display_cols = [
     "Ticker","Sector","Price","Yield","Yield_Hist",
     "Margin_Safety","PE","Payout","Dist_Low","Drawdown","Score"
 ]
 
-# =========================
-# FILTROS
-# =========================
-st.sidebar.header("🔎 Filtros")
-
-min_yield = st.sidebar.slider("Min Yield (%)", 0.0, 10.0, 2.0)
-min_score = st.sidebar.slider("Min Score", int(df["Score"].min()), int(df["Score"].max()), 5)
-
-sector_sel = st.sidebar.multiselect(
-    "Sector",
-    df["Sector"].dropna().unique(),
-    default=df["Sector"].dropna().unique()
-)
-
-filtered = df[
-    (df["Yield"] >= min_yield) &
-    (df["Score"] >= min_score) &
-    (df["Sector"].isin(sector_sel))
-].sort_values("Score", ascending=False)
-
-# =========================
-# SECTORES
-# =========================
-if not filtered.empty:
-    st.sidebar.subheader("📊 Sectores")
-    sector_weights = (filtered["Sector"].value_counts(normalize=True) * 100)
-    st.sidebar.bar_chart(sector_weights)
-
-# =========================
-# TABLA
-# =========================
-st.subheader(f"📊 Resultados ({len(filtered)})")
-st.dataframe(filtered[display_cols], use_container_width=True)
-
-# =========================
-# CSV
-# =========================
-today = datetime.now().strftime("%Y-%m-%d")
-csv = filtered.to_csv(index=False).encode("utf-8")
-st.download_button("📥 Descargar CSV", csv, f"dividend_kings_{today}.csv")
+st.dataframe(df[display_cols], use_container_width=True)
 
 # =========================
 # TOP 5
 # =========================
-if not filtered.empty:
-    top5 = filtered.head()
-    st.success(f"🚀 Top 5: {', '.join(top5['Ticker'].tolist())}")
+top5 = df.head()
 
-    for _, row in top5.iterrows():
-        st.write(f"{row['Ticker']} → Score {row['Score']} | Yield {row['Yield']:.2f}% | MOS {row.get('Margin_Safety')}")
+st.success(f"🚀 Top 5: {', '.join(top5['Ticker'].tolist())}")
 
-# =========================
-# SCATTER
-# =========================
-plot_df = filtered.copy()
+for _, row in top5.iterrows():
+    mos = row.get("Margin_Safety")
+    mos_str = f"{mos:.2f}" if mos and not math.isnan(mos) else "N/A"
 
-for col in ["PE","Yield","Score"]:
-    plot_df[col] = pd.to_numeric(plot_df[col], errors="coerce")
-
-plot_df = plot_df.dropna(subset=["PE","Yield","Score"])
-plot_df = plot_df[(plot_df["PE"] > 0) & (plot_df["PE"] < 100)]
-
-if not plot_df.empty:
-    threshold = plot_df["Score"].quantile(0.7)
-    opps = plot_df[plot_df["Score"] >= threshold]
-
-    fig = px.scatter(
-        opps,
-        x="PE",
-        y="Yield",
-        size="Score",
-        color="Sector",
-        hover_name="Ticker",
-        title="🎯 Top Opportunities"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-# =========================
-# DETALLE (FIX KEYERROR)
-# =========================
-st.divider()
-
-if not filtered.empty:
-    ticker = st.selectbox("Seleccionar acción", filtered["Ticker"])
-
-    data = next((x for x in raw_data if x["Ticker"] == ticker), None)
-
-    if data:
-        col1, col2 = st.columns([1, 2])
-
-        with col1:
-            st.metric("Precio", f"${data.get('Price',0):.2f}")
-            st.metric("Yield", f"{data.get('Yield',0):.2f}%")
-
-            payout = data.get("Payout")
-            st.write(f"Payout: {payout:.1%}" if payout else "Payout: N/A")
-
-            mos = data.get("Margin_Safety")
-            st.write(f"Margin Safety: {round(mos,2)}" if mos else "Margin Safety: N/A")
-
-            st.write(f"Sector: {data.get('Sector','N/A')}")
-
-        with col2:
-            hist = data.get("hist_df")
-            if hist is not None:
-                fig_hist = px.line(hist, y="Close", title=ticker)
-                st.plotly_chart(fig_hist, use_container_width=True)
+    st.write(f"{row['Ticker']} → Score {row['Score']} | Yield {row['Yield']:.2f}% | MOS {mos_str}")

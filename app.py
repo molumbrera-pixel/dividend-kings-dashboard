@@ -7,7 +7,7 @@ st.set_page_config(layout="wide")
 st.title("📊 Dividend Kings PRO Dashboard")
 
 # =========================
-# LISTA REAL (aprox actualizada)
+# LISTA
 # =========================
 DIVIDEND_KINGS = [
     "AWR","ABM","ABBV","ALB","AOS","APD","ATO","BDX","BF.B","CAH",
@@ -18,7 +18,7 @@ DIVIDEND_KINGS = [
 ]
 
 # =========================
-# DATA FUNCTION
+# DATA FUNCTION (FIXED)
 # =========================
 @st.cache_data
 def get_data(ticker):
@@ -34,13 +34,22 @@ def get_data(ticker):
         low_52 = hist["Close"].rolling(252).min().iloc[-1]
         high_all = hist["Close"].max()
 
-        dividend_yield = info.get("dividendYield", 0)
+        # 🔥 FIX YIELD
+        dividend_yield = info.get("dividendYield", None)
+        if dividend_yield and 0 < dividend_yield < 0.15:
+            yield_value = dividend_yield * 100
+        else:
+            yield_value = None
+
         pe = info.get("trailingPE", None)
         payout = info.get("payoutRatio", None)
 
         distance_low = (price - low_52) / low_52 * 100 if low_52 else 0
         drawdown = (price - high_all) / high_all * 100 if high_all else 0
 
+        # =========================
+        # DIVIDENDOS HISTÓRICOS
+        # =========================
         dividends = stock.dividends
 
         if dividends is None or dividends.empty:
@@ -51,15 +60,15 @@ def get_data(ticker):
 
             if len(dividends) > 5:
                 yearly = dividends.resample("YE").sum()
-                yield_hist = yearly.mean() / price
+                yield_hist = (yearly.mean() / price) * 100
             else:
                 yield_hist = None
 
         return {
             "hist": hist,
             "price": price,
-            "yield": dividend_yield * 100 if dividend_yield else 0,
-            "yield_hist": yield_hist * 100 if yield_hist else None,
+            "yield": yield_value,
+            "yield_hist": yield_hist,
             "pe": pe,
             "payout": payout,
             "distance_low": distance_low,
@@ -69,29 +78,40 @@ def get_data(ticker):
     except:
         return None
 
+
 # =========================
-# SCORING PRO
+# SCORING PRO REAL
 # =========================
 def score_stock(d):
     score = 0
 
+    # Yield vs histórico
     if d["yield"] and d["yield_hist"]:
         if d["yield"] > d["yield_hist"]:
             score += 3
 
+    # Cerca de mínimos
     if d["distance_low"] < 15:
         score += 2
 
+    # Caída relevante
     if d["drawdown"] < -20:
         score += 2
 
-    if d["payout"] and d["payout"] > 0.85:
+    # 🔴 Yield trap
+    if d["payout"] and d["payout"] > 1:
+        score -= 4
+    elif d["payout"] and d["payout"] > 0.85:
         score -= 2
 
-    if d["pe"] and d["pe"] > 28:
+    # Valuación
+    if d["pe"] and d["pe"] < 20:
+        score += 1
+    elif d["pe"] and d["pe"] > 30:
         score -= 1
 
     return score
+
 
 # =========================
 # LOAD DATA
@@ -112,6 +132,10 @@ rows = []
 for ticker, d in data.items():
     score = score_stock(d)
 
+    # 🚫 eliminar basura
+    if d["yield"] is None:
+        continue
+
     rows.append({
         "Ticker": ticker,
         "Price": d["price"],
@@ -131,7 +155,7 @@ if df.empty:
     st.stop()
 
 # =========================
-# RANKING AUTOMÁTICO
+# RANKING
 # =========================
 df = df.sort_values(by="Score", ascending=False)
 
@@ -155,7 +179,7 @@ st.subheader("📋 Tabla filtrada")
 st.dataframe(filtered, use_container_width=True)
 
 # =========================
-# SCATTER PRO 🔥
+# SCATTER
 # =========================
 st.subheader("📊 Yield vs Drawdown")
 
@@ -186,7 +210,7 @@ if not filtered.empty:
 
         col1, col2, col3, col4 = st.columns(4)
 
-        col1.metric("Yield", f"{d['yield']:.2f}%")
+        col1.metric("Yield", f"{d['yield']:.2f}%" if d["yield"] else "N/A")
         col2.metric("Hist Yield", f"{d['yield_hist']:.2f}%" if d["yield_hist"] else "N/A")
         col3.metric("Drawdown", f"{d['drawdown']:.2f}%")
         col4.metric("Score", score_stock(d))

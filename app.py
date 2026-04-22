@@ -31,7 +31,6 @@ def fetch_ticker_data(ticker):
 
         price = hist["Close"].iloc[-1]
 
-        # ✅ USAR CLOSE (mejor señal)
         low_52 = hist["Close"].rolling(252).min().iloc[-1]
         high_all = hist["Close"].max()
 
@@ -71,7 +70,7 @@ def fetch_ticker_data(ticker):
             "hist_df": hist
         }
 
-    except Exception:
+    except:
         return None
 
 
@@ -82,12 +81,11 @@ def get_all_data(tickers):
     return [r for r in results if r is not None]
 
 # =========================
-# SCORE MEJORADO
+# SCORE
 # =========================
 def calculate_score(row):
     score = 0
 
-    # Yield relativo
     if row['Yield'] and row['Yield_Hist']:
         ratio = row['Yield'] / row['Yield_Hist']
         if ratio > 1.2:
@@ -95,18 +93,15 @@ def calculate_score(row):
         elif ratio > 1:
             score += 2
 
-    # Caída inteligente
     if row['Drawdown'] < -30:
         if row['Yield'] > 2:
             score += 3
         else:
             score -= 2
 
-    # Cercanía a mínimos
     if row['Dist_Low'] < 10:
         score += 2
 
-    # Valuación
     pe = row['PE'] if row['PE'] else 100
     if pe < 12:
         score += 3
@@ -115,18 +110,15 @@ def calculate_score(row):
     elif pe > 35:
         score -= 3
 
-    # Payout
     payout = row['Payout'] if row['Payout'] else 0
     if payout > 0.9:
         score -= 5
     elif payout > 0.75:
         score -= 2
 
-    # Yield extremo (posible trampa)
     if row['Yield'] > 6:
         score -= 2
 
-    # Deterioro
     if row['Yield_Hist'] and row['Yield'] < row['Yield_Hist'] * 0.7:
         score -= 2
 
@@ -137,7 +129,7 @@ def calculate_score(row):
 # =========================
 st.title("📊 Dividend Kings PRO Dashboard")
 
-with st.spinner("Descargando datos..."):
+with st.spinner("Cargando datos..."):
     raw_data = get_all_data(DIVIDEND_KINGS)
 
 df = pd.DataFrame(raw_data)
@@ -161,12 +153,7 @@ display_cols = [
 st.sidebar.header("🔎 Filtros")
 
 min_yield = st.sidebar.slider("Min Yield (%)", 0.0, 10.0, 2.0)
-min_score = st.sidebar.slider(
-    "Min Score",
-    int(df["Score"].min()),
-    int(df["Score"].max()),
-    5
-)
+min_score = st.sidebar.slider("Min Score", int(df["Score"].min()), int(df["Score"].max()), 5)
 
 sector_sel = st.sidebar.multiselect(
     "Sector",
@@ -181,13 +168,39 @@ filtered = df[
 ].sort_values("Score", ascending=False)
 
 # =========================
+# SIDEBAR - SECTORES
+# =========================
+st.sidebar.subheader("📊 Distribución por Sector")
+
+if not filtered.empty:
+    sector_counts = filtered["Sector"].value_counts()
+    sector_weights = (sector_counts / sector_counts.sum()) * 100
+    st.sidebar.bar_chart(sector_weights)
+
+# =========================
 # TABLA
 # =========================
 st.subheader(f"📊 Resultados ({len(filtered)})")
 st.dataframe(filtered[display_cols], use_container_width=True)
 
 # =========================
-# SCATTER (TOP OPORTUNIDADES)
+# EXPORT CSV
+# =========================
+csv = filtered.to_csv(index=False).encode('utf-8')
+st.download_button("📥 Descargar CSV", csv, "dividend_kings.csv", "text/csv")
+
+# =========================
+# TOP 5
+# =========================
+if not filtered.empty:
+    top5 = filtered.head()
+    st.success(f"🚀 Top 5: {', '.join(top5['Ticker'].tolist())}")
+
+    for _, row in top5.iterrows():
+        st.write(f"{row['Ticker']} → Score: {row['Score']} | Yield: {row['Yield']}%")
+
+# =========================
+# SCATTER
 # =========================
 plot_df = filtered.copy()
 
@@ -234,7 +247,7 @@ if not filtered.empty:
                 delta = data["Yield"] - data["Yield_Hist"]
                 st.metric("Yield vs Hist", f"{data['Yield_Hist']:.2f}%", f"{delta:.2f}%")
 
-            st.write(f"Payout: {data['Payout']:.1%}" if data["Payout"] else "Payout: N/A")
+            st.write(f"Payout: {data['Payout']:.1%}" if data["Payout"] else "N/A")
             st.write(f"Sector: {data['Sector']}")
 
         with col2:

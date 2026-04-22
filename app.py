@@ -4,22 +4,18 @@ import pandas as pd
 import plotly.express as px
 from concurrent.futures import ThreadPoolExecutor
 
-# Configuración inicial
 st.set_page_config(layout="wide", page_title="Dividend Kings PRO")
 
-# =========================
-# LISTA DE TICKERS
-# =========================
 DIVIDEND_KINGS = [
     "AWR","ABM","ABBV","ALB","AOS","APD","ATO","BDX","BF-B","CAH",
     "CAT","CL","CINF","CLX","CMS","CVX","DOV","ED","EMR","FRT",
-    "GPC","HRL","ITW","JNJ","KMB","KO","LOW","MCD","MMM","MO",
-    "NUE","PEP","PG","PPG","RPM","SJW","SWK","SYY","TGT","TROW",
-    "WBA","WMT","XOM"
+    "GPC","HRL","ITW","JNJ","KMB","KO","LEG","LOW","MCD","MMM",
+    "MO","NUE","PEP","PG","PPG","RPM","SJW","SWK","SYY","TGT",
+    "TROW","WBA","WMT","XOM","ADP","LIN","SHW","MKC","PNR","ROL"
 ]
 
 # =========================
-# FUNCIÓN DE EXTRACCIÓN (REVISADA)
+# FETCH DATA
 # =========================
 def fetch_ticker_data(ticker):
     try:
@@ -34,155 +30,217 @@ def fetch_ticker_data(ticker):
         low_52 = hist["Low"].rolling(252).min().iloc[-1]
         high_all = hist["High"].max()
 
-        # Datos fundamentales con fallback
         pe = info.get("trailingPE")
-        sector = info.get("sector", "N/A")
-        
-        # Robustez en Payout Ratio
         payout = info.get("payoutRatio")
-        if payout is None:
-            eps = info.get("trailingEps")
-            div_rate = info.get("dividendRate")
-            if eps and div_rate and eps > 0:
-                payout = div_rate / eps
+        sector = info.get("sector", "N/A")
 
         distance_low = (price - low_52) / low_52 * 100 if low_52 else 0
         drawdown = (price - high_all) / high_all * 100 if high_all else 0
 
-        # Yield Actual (Últimos 12 meses)
         dividends = stock.dividends
         yield_value = 0
         yield_hist = None
 
-        if not dividends.empty:
-            last_year_divs = dividends[dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))].sum()
-            yield_value = (last_year_divs / price) * 100
+        if dividends is not None and not dividends.empty:
+            dividends.index = pd.to_datetime(dividends.index, errors="coerce")
+            dividends = dividends.dropna()
 
-            # Yield Histórico Real (Promedio de yields anuales)
+            last_year = dividends[dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))]
+            total_div = last_year.sum()
+
+            if price > 0:
+                yield_value = (total_div / price) * 100
+
             yearly = dividends.resample("YE").sum()
             if len(yearly) > 1:
-                # Calculamos el yield histórico promedio aproximado
                 avg_price = hist["Close"].mean()
                 yield_hist = (yearly.mean() / avg_price) * 100
 
         return {
             "Ticker": ticker,
             "Sector": sector,
-            "Price": price,
-            "Yield": yield_value,
-            "Yield_Hist": yield_hist,
+            "Price": round(price, 2),
+            "Yield": round(yield_value, 2),
+            "Yield_Hist": round(yield_hist, 2) if yield_hist else None,
             "PE": pe,
-            "Payout": payout * 100 if payout else None, # Guardamos como porcentaje 0-100
-            "Dist_Low": distance_low,
-            "Drawdown": drawdown,
-            "hist_df": hist # No se mostrará en la tabla, pero se usará para gráficos
+            "Payout": payout,
+            "Dist_Low": round(distance_low, 1),
+            "Drawdown": round(drawdown, 1),
+            "hist_df": hist
         }
-    except Exception:
+
+    except:
         return None
+
 
 @st.cache_data(ttl=3600)
 def get_all_data(tickers):
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(fetch_ticker_data, tickers))
+        results = executor.map(fetch_ticker_data, tickers)
     return [r for r in results if r is not None]
 
 # =========================
-# LÓGICA DE SCORING
+# SCORING
 # =========================
 def calculate_score(row):
     score = 0
-    # Oportunidad por Yield
+
     if row['Yield'] and row['Yield_Hist']:
-        if row['Yield'] > row['Yield_Hist'] * 1.1: score += 4
-        elif row['Yield'] > row['Yield_Hist']: score += 2
+        if row['Yield'] > row['Yield_Hist'] * 1.1:
+            score += 4
+        elif row['Yield'] > row['Yield_Hist']:
+            score += 2
 
-    # Cercanía a mínimos y Drawdown
-    if row['Dist_Low'] < 10: score += 3
-    if row['Drawdown'] < -20: score += 2
+    if row['Dist_Low'] < 10:
+        score += 3
 
-    # Penalización por Payout (Riesgo de recorte)
+    if row['Drawdown'] < -20:
+        score += 2
+
     payout = row['Payout'] if row['Payout'] else 0
-    if payout > 90: score -= 6
-    elif payout > 75: score -= 3
-    
-    # Valuación PE
+    if payout and payout > 0.9:
+        score -= 5
+    elif payout and payout > 0.75:
+        score -= 2
+
     pe = row['PE'] if row['PE'] else 100
-    if pe < 15: score += 3
-    elif pe > 30: score -= 2
+    if pe < 15:
+        score += 3
+    elif pe > 30:
+        score -= 2
 
     return score
 
 # =========================
-# INTERFAZ (UI)
+# APP
 # =========================
 st.title("📊 Dividend Kings PRO Dashboard")
-st.markdown("---")
 
-with st.spinner("Analizando mercado en tiempo real..."):
+with st.spinner("Descargando datos..."):
     raw_data = get_all_data(DIVIDEND_KINGS)
 
 df = pd.DataFrame(raw_data)
+
 if df.empty:
-    st.error("No se pudieron obtener datos.")
+    st.error("No se pudieron cargar datos.")
     st.stop()
 
 df['Score'] = df.apply(calculate_score, axis=1)
+df["Score"] = df["Score"].fillna(0)
 df = df.sort_values("Score", ascending=False)
 
-# --- TABLA DE OPORTUNIDADES ---
-st.subheader("🏆 Ranking de Oportunidades")
+score_min = int(df["Score"].min())
+score_max = int(df["Score"].max())
 
-# Columnas que queremos mostrar (excluimos hist_df para evitar el error visual)
-display_cols = ["Ticker", "Sector", "Price", "Yield", "Yield_Hist", "PE", "Payout", "Score"]
+# =========================
+# TOP
+# =========================
+st.subheader("🏆 Top Oportunidades")
 
 st.dataframe(
-    df[display_cols],
+    df.head(10),
     use_container_width=True,
-    hide_index=True,
     column_config={
         "Score": st.column_config.ProgressColumn(
-            "Puntaje", min_value=int(df["Score"].min()), max_value=int(df["Score"].max()), format="%d pts"
-        ),
-        "Price": st.column_config.NumberColumn("Precio", format="$%.2f"),
-        "Yield": st.column_config.NumberColumn("Yield %", format="%.2f%%"),
-        "Yield_Hist": st.column_config.NumberColumn("Yield Hist %", format="%.2f%%"),
-        "Payout": st.column_config.NumberColumn("Payout %", format="%.1f%%"),
-        "PE": st.column_config.NumberColumn("P/E Ratio", format="%.1f"),
+            "Score",
+            min_value=score_min,
+            max_value=score_max,
+        )
     }
 )
 
-# --- FILTROS ---
-st.sidebar.header("🔎 Filtros de Cartera")
-selected_sectors = st.sidebar.multiselect("Sectores", df["Sector"].unique(), default=df["Sector"].unique())
-min_yield = st.sidebar.slider("Yield Mínimo (%)", 0.0, 10.0, 2.0)
+# =========================
+# FILTROS
+# =========================
+st.sidebar.header("Filtros")
 
-filtered = df[(df["Sector"].isin(selected_sectors)) & (df["Yield"] >= min_yield)]
+sector_sel = st.sidebar.multiselect(
+    "Sector",
+    df["Sector"].dropna().unique(),
+    default=df["Sector"].dropna().unique()
+)
 
-# --- GRÁFICOS ---
-col_g1, col_g2 = st.columns(2)
-with col_g1:
-    fig_scatter = px.scatter(
-        filtered, x="PE", y="Yield", size="Score", color="Sector",
-        hover_name="Ticker", title="Atractivo: Valuación vs Rendimiento"
-    )
-    st.plotly_chart(fig_scatter, use_container_width=True)
+min_score = st.sidebar.slider(
+    "Score mínimo",
+    int(score_min),
+    int(score_max),
+    5
+)
 
-with col_g2:
-    fig_hist = px.histogram(filtered, x="Score", color="Sector", title="Distribución de Calidad (Scores)")
-    st.plotly_chart(fig_hist, use_container_width=True)
+filtered = df[
+    (df["Sector"].isin(sector_sel)) &
+    (df["Score"] >= min_score)
+]
 
-# --- DETALLE INDIVIDUAL ---
+st.subheader(f"Resultados ({len(filtered)})")
+st.dataframe(filtered, use_container_width=True)
+
+# =========================
+# SCATTER FIXED
+# =========================
+plot_df = filtered.copy()
+
+for col in ["PE", "Yield", "Score"]:
+    plot_df[col] = pd.to_numeric(plot_df[col], errors="coerce")
+
+plot_df = plot_df.dropna(subset=["PE", "Yield", "Score"])
+plot_df = plot_df[(plot_df["PE"] > 0) & (plot_df["PE"] < 100)]
+
+fig_scatter = px.scatter(
+    plot_df,
+    x="PE",
+    y="Yield",
+    size="Score",
+    color="Sector",
+    hover_name="Ticker",
+    title="Atractivo: Valuación vs Rendimiento"
+)
+
+st.plotly_chart(fig_scatter, use_container_width=True)
+
+# =========================
+# DETALLE
+# =========================
 st.divider()
-st.subheader("🔍 Análisis Profundo")
-if not filtered.empty:
-    selected_ticker = st.selectbox("Selecciona un Ticker para ver su historial:", filtered["Ticker"])
-    ticker_data = next(x for x in raw_data if x["Ticker"] == selected_ticker)
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Yield Actual", f"{ticker_data['Yield']:.2f}%", 
-              delta=f"{ticker_data['Yield'] - ticker_data['Yield_Hist']:.2f}% vs Promedio")
-    c2.metric("Distancia del Mínimo (52W)", f"{ticker_data['Dist_Low']:.1f}%")
-    c3.metric("Payout Ratio", f"{ticker_data['Payout']:.1f}%" if ticker_data['Payout'] else "N/A")
 
-    fig_line = px.line(ticker_data["hist_df"], y="Close", title=f"Precio 10 años - {selected_ticker}")
-    st.plotly_chart(fig_line, use_container_width=True)
+if not filtered.empty:
+    ticker = st.selectbox("Seleccionar acción", filtered["Ticker"])
+
+    data = next((x for x in raw_data if x["Ticker"] == ticker), None)
+
+    if data:
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.metric("Precio", f"${data['Price']:.2f}")
+            st.metric("Yield", f"{data['Yield']:.2f}%")
+
+            if data["Yield_Hist"]:
+                delta = data["Yield"] - data["Yield_Hist"]
+                st.metric("Yield vs Hist", f"{data['Yield_Hist']:.2f}%", f"{delta:.2f}%")
+
+            st.write(f"Payout: {data['Payout']:.1%}" if data["Payout"] else "Payout: N/A")
+            st.write(f"Sector: {data['Sector']}")
+
+        with col2:
+            fig_hist = px.line(data["hist_df"], y="Close", title=ticker)
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+# =========================
+# BACKTEST SIMPLE
+# =========================
+st.divider()
+st.header("📊 Backtest")
+
+def run_backtest(tickers, start="2018-01-01"):
+    prices = yf.download(tickers, start=start)["Close"]
+    returns = prices.pct_change().dropna()
+    portfolio = returns.mean(axis=1)
+    return (1 + portfolio).cumprod()
+
+if st.button("Ejecutar Backtest"):
+    bt = run_backtest(DIVIDEND_KINGS)
+
+    if bt is not None:
+        fig_bt = px.line(bt, title="Backtest Estrategia (Equal Weight)")
+        st.plotly_chart(fig_bt, use_container_width=True)

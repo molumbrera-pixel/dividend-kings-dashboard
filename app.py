@@ -4,234 +4,206 @@ import pandas as pd
 import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor
 import time
-import math
+import requests
+import requests_cache
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
+# =========================
+# CONFIGURACIÓN Y SESIÓN ANTIBLOQUEO
+# =========================
 st.set_page_config(layout="wide", page_title="Dividend Kings PRO HYBRID")
 
+# Creamos una sesión con caché (evita pedir lo mismo 100 veces) y reintentos
+@st.cache_resource
+def get_safe_session():
+    session = requests_cache.CachedSession('yahoo_cache', expire_after=3600) # Caché de 1 hora
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    })
+    # Lógica de reintento si Yahoo falla temporalmente
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    return session
+
+session = get_safe_session()
+
 # =========================
-# LISTA
+# LISTA (Limpia)
 # =========================
-DIVIDEND_KINGS = list(set([
+DIVIDEND_KINGS = sorted(list(set([
     "AWR","DOV","NWN","GPC","PG","PH","EMR","CINF","KO","JNJ","CL","NDSN",
-    "ABM","SCL","CBSH","HTO","FUL","MO","BKH","NFG","UVV","MSA","SYY","LOW",
+    "ABM","SCL","CBSH","FUL","MO","BKH","NFG","UVV","MSA","SYY","LOW",
     "TGT","GWW","ABT","ADP","LIN","SHW","MKC","PNR","ROL","AOS","APD","ATO",
     "BDX","BF-B","CAH","CAT","CLX","CMS","CVX","ED","FRT","HRL","ITW","KMB",
     "MCD","MMM","PEP","PPG","RPM","SJW","SWK","TROW","WBA","WMT","XOM","NUE"
-]))
+])))
 
+# =========================
+# FETCH DATA (MEJORADO)
+# =========================
 def fetch_fast_data(ticker):
     try:
-        time.sleep(0.2)
-
-        hist = yf.download(ticker, period="10y", progress=False)
+        stock = yf.Ticker(ticker, session=session)
+        hist = stock.history(period="10y", progress=False)
 
         if hist.empty or len(hist) < 200:
-            print(f"{ticker} sin datos")
             return None
 
         price = hist["Close"].iloc[-1]
         low_52 = hist["Close"].tail(252).min()
         high_all = hist["Close"].max()
 
+        # Yield Actual
+        dividends = stock.dividends
+        yield_value = 0
+        yield_hist = None
+
+        if not dividends.empty:
+            dividends.index = pd.to_datetime(dividends.index).tz_localize(None)
+            last_year = dividends[dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))]
+            yield_value = (last_year.sum() / price) * 100
+
+            # Yield Histórico Real (Promedio de yields anuales para comparar)
+            yearly_divs = dividends.resample("YE").sum()
+            if len(yearly_divs) > 1:
+                avg_price = hist["Close"].mean()
+                yield_hist = (yearly_divs.mean() / avg_price) * 100
+
         return {
             "Ticker": ticker,
             "Price": price,
-            "Yield": 0,
+            "Yield": yield_value,
+            "Yield_Hist": yield_hist,
             "PE": None,
             "Payout": None,
-            "Sector": "Unknown",
+            "Sector": "Cargando...",
             "Drawdown": (price - high_all) / high_all * 100,
             "Dist_Low": (price - low_52) / low_52 * 100,
             "hist_df": hist
         }
-
-    except Exception as e:
-        print(f"Error {ticker}: {e}")
+    except:
         return None
 
-
-# =========================
-# EXTRA FETCH (LENTO)
-# =========================
 def fetch_extra_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-
-        try:
-            info = stock.info
-        except:
-            return {}
+        stock = yf.Ticker(ticker, session=session)
+        info = stock.info
+        
+        # Payout Robusto (Calculado si el directo falla)
+        payout = info.get("payoutRatio")
+        if payout is None:
+            eps = info.get("trailingEps")
+            div_rate = info.get("dividendRate")
+            if eps and div_rate and eps > 0:
+                payout = div_rate / eps
 
         return {
             "PE": info.get("trailingPE"),
-            "Payout": info.get("payoutRatio"),
-            "Sector": info.get("sector", "Unknown")
+            "Payout": payout,
+            "Sector": info.get("sector", "N/A")
         }
-
     except:
         return {}
 
+# =========================
+# LOADERS (SINCRONIZADOS)
+# =========================
+@st.cache_data(ttl=3600)
+def load_all_data(tickers):
+    # Paso 1: Fast data con pocos workers para evitar bloqueos
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        base_results = list(executor.map(fetch_fast_data, tickers))
+    
+    base_data = [r for r in base_results if r]
+    
+    # Paso 2: Extra data con delay preventivo
+    for row in base_data:
+        extra = fetch_extra_data(row["Ticker"])
+        row.update(extra)
+        time.sleep(0.1) # Respeto a la API
+        
+    return base_data
 
 # =========================
-# LOADERS
-# =========================
-@st.cache_data(ttl=600)
-def load_fast(tickers):
-    with ThreadPoolExecutor(max_workers=2):
-        results = list(map(fetch_fast_data, tickers))
-    return [r for r in results if r]
-
-
-@st.cache_data(ttl=1800)
-def load_extra(tickers):
-    extra = {}
-    for t in tickers:
-        extra[t] = fetch_extra_data(t)
-        time.sleep(0.2)
-    return extra
-
-
-def merge_data(base, extra):
-    for row in base:
-        t = row["Ticker"]
-        if t in extra:
-            for k, v in extra[t].items():
-                if v is not None:
-                    row[k] = v
-    return base
-
-
-# =========================
-# PIPELINE
-# =========================
-def normalize_data(df):
-    cols = ["Yield","PE","Payout","Drawdown","Dist_Low"]
-    for col in cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["Sector"] = df["Sector"].fillna("Unknown")
-    df["PE"] = df["PE"].fillna(100)
-    df["Payout"] = df["Payout"].fillna(0)
-    df["Yield"] = df["Yield"].fillna(0)
-
-    return df
-
-
-def clean_data(df):
-    return df[(df["Price"] > 0) & (df["Yield"] < 20) & (df["PE"] < 150)]
-
-
-# =========================
-# SCORE + SIGNAL
+# LÓGICA DE SCORE
 # =========================
 def calculate_score(row):
     score = 0
+    # Yield vs su propia historia (Valor)
+    if row["Yield"] and row["Yield_Hist"]:
+        if row["Yield"] > row["Yield_Hist"] * 1.15: score += 4
+        elif row["Yield"] > row["Yield_Hist"]: score += 2
 
-    if row["Yield"] > 3:
-        score += 2
+    if row["Drawdown"] < -25: score += 2
+    if row["Dist_Low"] < 8: score += 2
 
-    if row["Drawdown"] < -30:
-        score += 2
+    # Fundamentales
+    pe = row["PE"] if row["PE"] and not pd.isna(row["PE"]) else 100
+    if pe < 16: score += 3
+    elif pe > 32: score -= 2
 
-    if row["Dist_Low"] < 10:
-        score += 1
-
-    if row["PE"] < 15:
-        score += 2
-    elif row["PE"] > 35:
-        score -= 2
-
-    if row["Payout"] > 0.9:
-        score -= 3
+    payout = row["Payout"] if row["Payout"] and not pd.isna(row["Payout"]) else 0
+    if payout > 0.85: score -= 5
+    elif payout > 0.70: score -= 2
 
     return score
 
-
-def entry_signal(row):
-    if row["Score"] >= 5:
-        return "🟢 Strong Buy"
-    elif row["Score"] >= 3:
-        return "🟡 Watch / DCA"
-    else:
-        return "🔴 Avoid"
-
-
 # =========================
-# APP
+# APP UI
 # =========================
-st.title("📊 Dividend Kings PRO HYBRID")
+st.title("📊 Dividend Kings PRO: Sistema Híbrido")
 
-# ⚡ FASE 1
-raw_data = load_fast(DIVIDEND_KINGS)
+with st.spinner("Sincronizando con mercado (usando caché seguro)..."):
+    data = load_all_data(DIVIDEND_KINGS)
 
-if not raw_data:
-    st.error("No se pudieron cargar datos base")
-    st.stop()
-
-st.success("⚡ Datos base cargados")
-
-# 🧠 FASE 2
-with st.spinner("Enriqueciendo datos..."):
-    extra_data = load_extra([x["Ticker"] for x in raw_data])
-
-raw_data = merge_data(raw_data, extra_data)
-
-# =========================
-# DATAFRAME
-# =========================
-df = pd.DataFrame(raw_data)
-df = normalize_data(df)
-df = clean_data(df)
-
+df = pd.DataFrame(data)
 df["Score"] = df.apply(calculate_score, axis=1)
-df["Signal"] = df.apply(entry_signal, axis=1)
-
 df = df.sort_values("Score", ascending=False)
 
-# =========================
-# FILTROS
-# =========================
-col1, col2 = st.columns(2)
+# --- FILTROS SIDEBAR ---
+st.sidebar.header("Configuración de Radar")
+min_score = st.sidebar.slider("Score de Calidad Mínimo", -5, 12, 4)
+show_sectors = st.sidebar.multiselect("Sectores", df["Sector"].unique(), default=df["Sector"].unique())
 
-min_score = col1.slider("Score mínimo", 0, 10, 0)
-signal_filter = col2.multiselect(
-    "Señal",
-    df["Signal"].unique(),
-    default=df["Signal"].unique()
+df_filtered = df[(df["Score"] >= min_score) & (df["Sector"].isin(show_sectors))]
+
+# --- VISUALIZACIÓN DE TABLA ---
+st.subheader(f"Oportunidades Detectadas ({len(df_filtered)})")
+
+# IMPORTANTE: Definimos las columnas a mostrar y su formato
+st.dataframe(
+    df_filtered.drop(columns=["hist_df"]), # Eliminamos los datos pesados de la vista
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Score": st.column_config.ProgressColumn("Score", min_value=-5, max_value=12, format="%d pts"),
+        "Price": st.column_config.NumberColumn("Precio", format="$%.2f"),
+        "Yield": st.column_config.NumberColumn("Yield %", format="%.2f%%"),
+        "Yield_Hist": st.column_config.NumberColumn("Yield Hist %", format="%.2f%%"),
+        "Payout": st.column_config.NumberColumn("Payout Ratio", format="%.1%"),
+        "PE": st.column_config.NumberColumn("P/E Ratio", format="%.1f"),
+        "Drawdown": st.column_config.NumberColumn("Caída Máx", format="%.1f%%"),
+        "Dist_Low": st.column_config.NumberColumn("Dist. Mínimo", format="%.1f%%"),
+    }
 )
 
-df_f = df[
-    (df["Score"] >= min_score) &
-    (df["Signal"].isin(signal_filter))
-]
-
-st.dataframe(df_f, use_container_width=True)
-
-# =========================
-# DETALLE + GRAFICO
-# =========================
+# --- DETALLE Y GRÁFICO ---
 st.divider()
+if not df_filtered.empty:
+    t_sel = st.selectbox("Analizar Ticker en Profundidad", df_filtered["Ticker"])
+    d_sel = next(x for x in data if x["Ticker"] == t_sel)
 
-ticker_sel = st.selectbox("Seleccionar acción", df_f["Ticker"])
-
-data_sel = next((x for x in raw_data if x["Ticker"] == ticker_sel), None)
-
-if data_sel:
-    col1, col2 = st.columns([1,2])
-
-    with col1:
-        st.metric("Precio", f"${data_sel['Price']:.2f}")
-        st.metric("Yield", f"{data_sel['Yield']:.2f}%")
-        st.write(f"Sector: {data_sel.get('Sector','N/A')}")
-
-    with col2:
-        hist = data_sel["hist_df"]
-
-        df_plot = hist.copy()
-        df_plot["MA200"] = df_plot["Close"].rolling(200).mean()
-
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.metric("Yield Actual", f"{d_sel['Yield']:.2f}%")
+        st.metric("P/E Ratio", f"{d_sel['PE']:.1f}" if d_sel['PE'] else "N/A")
+        st.write(f"**Estatus:** {'🟢 Compra' if d_sel['Score'] >= 6 else '🟡 Mantener'}")
+    
+    with c2:
+        h = d_sel["hist_df"]
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Precio"))
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA200"], name="MA200"))
-
+        fig.add_trace(go.Scatter(x=h.index, y=h["Close"], name="Precio", line=dict(color="#00ff00")))
+        fig.add_trace(go.Scatter(x=h.index, y=h["Close"].rolling(200).mean(), name="MA200", line=dict(dash='dot')))
+        fig.update_layout(title=f"Historial 10 años: {t_sel}", template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)

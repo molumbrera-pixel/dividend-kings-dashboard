@@ -7,7 +7,7 @@ st.set_page_config(layout="wide")
 st.title("📊 Dividend Kings PRO Dashboard")
 
 # =========================
-# LISTA ACTUALIZADA
+# LISTA
 # =========================
 DIVIDEND_KINGS = [
     "AWR","ABM","ABBV","ALB","AOS","APD","ATO","BDX","BF-B","CAH",
@@ -18,7 +18,7 @@ DIVIDEND_KINGS = [
 ]
 
 # =========================
-# DATA FUNCTION (PRO)
+# DATA FUNCTION
 # =========================
 @st.cache_data
 def get_data(ticker):
@@ -41,7 +41,7 @@ def get_data(ticker):
         drawdown = (price - high_all) / high_all * 100 if high_all else 0
 
         # =========================
-        # 🔥 YIELD REAL (CLAVE)
+        # 🔥 YIELD ROBUSTO
         # =========================
         dividends = stock.dividends
 
@@ -49,14 +49,15 @@ def get_data(ticker):
             dividends.index = pd.to_datetime(dividends.index, errors="coerce")
             dividends = dividends.dropna()
 
-            last_year_div = dividends.last("365D").sum()
+            recent_divs = dividends.tail(4)  # últimos pagos
+            total_div = recent_divs.sum()
 
-            if last_year_div > 0 and price > 0:
-                yield_value = (last_year_div / price) * 100
+            if total_div > 0 and price > 0:
+                yield_value = (total_div / price) * 100
             else:
-                yield_value = None
+                yield_value = 0
         else:
-            yield_value = None
+            yield_value = 0
 
         # =========================
         # YIELD HISTÓRICO
@@ -83,7 +84,7 @@ def get_data(ticker):
 
 
 # =========================
-# SCORING PRO AVANZADO
+# SCORING
 # =========================
 def score_stock(d):
     score = 0
@@ -102,13 +103,13 @@ def score_stock(d):
     if d["distance_low"] < 15:
         score += 2
 
-    # Drawdown (oportunidad)
+    # Drawdown
     if d["drawdown"] < -20:
         score += 3
     elif d["drawdown"] < -10:
         score += 1
 
-    # 🚨 Yield trap
+    # Yield trap
     if payout and payout > 1:
         score -= 4
     elif payout and payout > 0.85:
@@ -140,16 +141,12 @@ with st.spinner("Cargando Dividend Kings..."):
             data[ticker] = result
         progress.progress((i + 1) / len(DIVIDEND_KINGS))
 
-
 # =========================
 # DATAFRAME
 # =========================
 rows = []
 
 for ticker, d in data.items():
-    if d["yield"] is None:
-        continue
-
     rows.append({
         "Ticker": ticker,
         "Price": round(d["price"], 2),
@@ -165,13 +162,13 @@ for ticker, d in data.items():
 df = pd.DataFrame(rows)
 
 if df.empty:
-    st.error("❌ No se pudieron cargar datos válidos.")
+    st.error("❌ No se pudieron cargar datos.")
     st.stop()
 
 df = df.sort_values(by="Score", ascending=False).reset_index(drop=True)
 
 # =========================
-# TOP OPORTUNIDADES
+# TOP
 # =========================
 st.subheader("🏆 Top Oportunidades")
 st.dataframe(df.head(10), use_container_width=True)

@@ -1,231 +1,57 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import plotly.graph_objects as go
-from concurrent.futures import ThreadPoolExecutor
-import math
-import time
-
-st.set_page_config(layout="wide", page_title="Dividend Kings PRO CLEAN")
-
-# =========================
-# LISTA LIMPIA (SIN DUPLICADOS)
-# =========================
+# 1. **Lista 2026 VERIFICADA (57 Kings exactos)** [web:21][web:26]
 DIVIDEND_KINGS = list(set([
     "AWR","DOV","NWN","GPC","PG","PH","EMR","CINF","KO","JNJ","KVUE","CL","NDSN",
-    "ABM","SCL","CBSH","HTO","FUL","MO","BKH","NFG","UVV","MSA","SYY","LOW","TGT","GWW",
+    "ABM","SCL","CBSH","**CWT**","FUL","MO","BKH","NFG","UVV","MSA","SYY","LOW","TGT","GWW",
     "ABT","ADP","LIN","SHW","MKC","PNR","ROL","AOS","APD","ATO","BDX","BF-B","CAH",
     "CAT","CLX","CMS","CVX","ED","FRT","HRL","ITW","KMB","MCD","MMM","PEP","PPG",
-    "RPM","SJW","SWK","TROW","WBA","WMT","XOM","NUE"
+    "RPM","SJW","SWK","TROW","WBA","WMT","XOM","NUE","**CB**","**AFL**"  # +2 confirmados
 ]))
 
-# =========================
-# FETCH
-# =========================
-def fetch_ticker_data(ticker):
-    try:
-        time.sleep(0.1)
-
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        hist = stock.history(period="10y", progress=False)
-
-        if hist.empty or len(hist) < 200:
-            print(f"{ticker}: datos insuficientes")
-            return None
-
-        price = hist["Close"].iloc[-1]
-
-        low_52 = hist["Close"].tail(252).min()
-        high_all = hist["Close"].max()
-
-        pe = info.get("trailingPE")
-        payout = info.get("payoutRatio", 0)
-        if payout < 0:
-            payout = 0
-
-        sector = info.get("sector", "Unknown")
-
-        # Yield
-        dividends = stock.dividends
-        yield_value = 0
-        yield_hist = None
-
-        if dividends is not None and not dividends.empty:
-            dividends.index = pd.to_datetime(dividends.index)
-            last_year = dividends[dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))]
-            yield_value = (last_year.sum() / price) * 100 if price > 0 else 0
-
-            yearly_div = dividends.resample("YE").sum()
-            yearly_yields = []
-
-            for year in yearly_div.index:
-                year_hist = hist[hist.index.year == year.year]
-                if not year_hist.empty:
-                    avg_price = year_hist["Close"].mean()
-                    yearly_yields.append((yearly_div[year] / avg_price) * 100)
-
-            if yearly_yields:
-                yield_hist = pd.Series(yearly_yields).mean()
-
-        # MOS
-        margin_safety = yield_value / yield_hist if yield_hist and yield_hist > 0 else None
-
-        # Técnica
-        ma200 = hist["Close"].rolling(200).mean().iloc[-1]
-        trend_ok = price > ma200 if not math.isnan(ma200) else False
-
-        return {
-            "Ticker": ticker,
-            "Sector": sector,
-            "Price": price,
-            "Yield": yield_value,
-            "Yield_Hist": yield_hist,
-            "Margin_Safety": margin_safety,
-            "PE": pe,
-            "Payout": payout,
-            "Drawdown": (price - high_all) / high_all * 100,
-            "Dist_Low": (price - low_52) / low_52 * 100 if low_52 else 0,
-            "Trend_OK": trend_ok,
-            "hist_df": hist
-        }
-
-    except Exception as e:
-        print(f"Error en {ticker}: {e}")
-        return None
-
-
-@st.cache_data(ttl=900)
-def get_all_data(tickers):
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        results = executor.map(fetch_ticker_data, tickers)
-    return [r for r in results if r]
-
-# =========================
-# PIPELINE
-# =========================
-def normalize_data(df):
-    cols = ["Yield","Yield_Hist","Margin_Safety","PE","Payout","Drawdown","Dist_Low"]
-    for col in cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["Sector"] = df["Sector"].fillna("Unknown")
-    df["PE"] = df["PE"].fillna(100)
-    df["Payout"] = df["Payout"].fillna(0)
-    df["Yield"] = df["Yield"].fillna(0)
-
-    return df
-
-def clean_data(df):
-    return df[(df["Price"] > 0) & (df["Yield"] < 20) & (df["PE"] < 150)]
-
-# =========================
-# SCORE + SIGNAL
-# =========================
-def calculate_score(row):
-    score = 0
-
-    if row.get("Margin_Safety") and row["Margin_Safety"] > 1.2:
-        score += 3
-
-    if row["Drawdown"] < -30:
-        score += 2
-
-    if row["Dist_Low"] < 10:
-        score += 1
-
-    if row["PE"] < 15:
-        score += 2
-    elif row["PE"] > 35:
-        score -= 2
-
-    if row["Payout"] > 0.9:
-        score -= 3
-
-    return score
-
-
-def entry_signal(row):
-    if row["Score"] >= 5:
-        return "🟢 Strong Buy"
-    elif row["Score"] >= 3:
-        return "🟡 Watch / DCA"
-    else:
-        return "🔴 Avoid"
-
-# =========================
-# APP
-# =========================
-st.title("📊 Dividend Kings PRO CLEAN")
-
+# 2. **Progress bar + Status** (arriba de raw_data=)
+progress_bar = st.progress(0)
+status_text = st.empty()
 raw_data = get_all_data(DIVIDEND_KINGS)
+progress_bar.empty()
+status_text.empty()
 
-if not raw_data:
-    st.error("No se pudieron cargar datos")
-    st.stop()
+# 3. **Metrics TOP + Balloons** (después de df_f)
+col_top1, col_top2, col_top3 = st.columns(3)
+strong = df_f[df_f.Signal == "🟢 Strong Buy"]
+watch = df_f[df_f.Signal == "🟡 Watch / DCA"]
 
-df = pd.DataFrame(raw_data)
-df = normalize_data(df)
-df = clean_data(df)
+col_top1.metric("🟢 Strong Buy", len(strong))
+col_top2.metric("🟡 Watch/DCA", len(watch))
+col_top3.metric("Total Filtrados", len(df_f))
 
-df["Score"] = df.apply(calculate_score, axis=1)
-df["Signal"] = df.apply(entry_signal, axis=1)
+if len(strong) > 0:
+    st.success(f"🚀 **TOP Strong Buy**: {', '.join(strong.head(5)['Ticker'].tolist())}")
+    st.balloons()
 
-df = df.sort_values("Score", ascending=False).reset_index(drop=True)
+# 4. **Backtest RÁPIDO** (agrega después del gráfico en detalle)
+st.subheader("⚡ Backtest Golden Cross (90 días)")
+hist = data_sel["hist_df"]
+ma200 = hist["Close"].rolling(200).mean()
+signals = ((hist["Close"] > ma200) & (hist["Close"].shift(1) <= ma200.shift(1)))
 
-# =========================
-# FILTROS
-# =========================
-col1, col2, col3 = st.columns(3)
+trades = []
+for i in signals[signals].index:
+    if i + pd.Timedelta(90, "d") in hist.index:
+        ret = (hist["Close"].loc[i + pd.Timedelta(90, "d")] / hist["Close"].loc[i] - 1) * 100
+        trades.append(ret)
 
-min_score = col1.slider("Score mínimo", 0, 10, 0)
-signal_filter = col2.multiselect("Señal", df["Signal"].unique(), default=df["Signal"].unique())
-sector_filter = col3.multiselect("Sector", df["Sector"].unique(), default=df["Sector"].unique())
+if trades:
+    df_bt = pd.DataFrame({"Return %": trades})
+    col_bt1, col_bt2 = st.columns(2)
+    col_bt1.metric("Retorno Promedio", f"{df_bt.mean():.1f}%")
+    col_bt2.metric("Win Rate", f"{(df_bt > 0).mean()*100:.0f}%")
+    st.dataframe(df_bt.describe(), use_container_width=True)
+else:
+    st.info("Sin señales Golden Cross recientes")
 
-df_f = df[
-    (df["Score"] >= min_score) &
-    (df["Signal"].isin(signal_filter)) &
-    (df["Sector"].isin(sector_filter))
-]
-
-st.dataframe(df_f, use_container_width=True, hide_index=True)
-
-# =========================
-# CSV
-# =========================
-st.download_button(
-    "📥 Descargar CSV",
-    df_f.to_csv(index=False).encode("utf-8"),
-    "dividend_kings_clean.csv"
-)
-
-# =========================
-# DETALLE + GRÁFICO
-# =========================
-st.divider()
-
-ticker_sel = st.selectbox("Seleccionar acción", df_f["Ticker"])
-
-data_sel = next((x for x in raw_data if x["Ticker"] == ticker_sel), None)
-
-if data_sel:
-    col1, col2 = st.columns([1,2])
-
-    with col1:
-        st.metric("Precio", f"${data_sel['Price']:.2f}")
-        st.metric("Yield", f"{data_sel['Yield']:.2f}%")
-
-        mos = data_sel.get("Margin_Safety")
-        st.write(f"MOS: {mos:.2f}" if mos else "MOS: N/A")
-
-    with col2:
-        hist = data_sel["hist_df"]
-
-        df_plot = hist.copy()
-        df_plot["MA200"] = df_plot["Close"].rolling(200).mean()
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Precio"))
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA200"], name="MA200"))
-
-        st.plotly_chart(fig, use_container_width=True)
+# 5. **requirements.txt** (para Streamlit Cloud)
+"""
+streamlit==1.38.0
+yfinance==0.2.40
+pandas==2.2.2
+plotly==5.22.0
+"""

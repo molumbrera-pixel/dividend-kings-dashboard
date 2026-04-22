@@ -199,7 +199,7 @@ if df.empty:
     st.error("No se pudieron cargar datos.")
     st.stop()
 
-# PIPELINE
+# pipeline
 df = normalize_data(df)
 df = clean_data(df)
 
@@ -236,7 +236,7 @@ filtered = df[
 ].sort_values("Score", ascending=False)
 
 # =========================
-# SIDEBAR SECTORES
+# SECTORES
 # =========================
 if not filtered.empty:
     st.sidebar.subheader("📊 Sectores")
@@ -264,7 +264,7 @@ if not filtered.empty:
     st.success(f"🚀 Top 5: {', '.join(top5['Ticker'].tolist())}")
 
     for _, row in top5.iterrows():
-        st.write(f"{row['Ticker']} → Score {row['Score']} | Yield {row['Yield']:.2f}% | MOS {row['Margin_Safety']}")
+        st.write(f"{row['Ticker']} → Score {row['Score']} | Yield {row['Yield']:.2f}% | MOS {row.get('Margin_Safety')}")
 
 # =========================
 # SCATTER
@@ -294,7 +294,7 @@ if not plot_df.empty:
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# DETALLE
+# DETALLE (FIX KEYERROR)
 # =========================
 st.divider()
 
@@ -307,12 +307,19 @@ if not filtered.empty:
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            st.metric("Precio", f"${data['Price']:.2f}")
-            st.metric("Yield", f"{data['Yield']:.2f}%")
-            st.write(f"Payout: {data['Payout']:.1%}" if data["Payout"] else "N/A")
-            st.write(f"Margin Safety: {data['Margin_Safety']}")
-            st.write(f"Sector: {data['Sector']}")
+            st.metric("Precio", f"${data.get('Price',0):.2f}")
+            st.metric("Yield", f"{data.get('Yield',0):.2f}%")
+
+            payout = data.get("Payout")
+            st.write(f"Payout: {payout:.1%}" if payout else "Payout: N/A")
+
+            mos = data.get("Margin_Safety")
+            st.write(f"Margin Safety: {round(mos,2)}" if mos else "Margin Safety: N/A")
+
+            st.write(f"Sector: {data.get('Sector','N/A')}")
 
         with col2:
-            fig_hist = px.line(data["hist_df"], y="Close", title=ticker)
-            st.plotly_chart(fig_hist, use_container_width=True)
+            hist = data.get("hist_df")
+            if hist is not None:
+                fig_hist = px.line(hist, y="Close", title=ticker)
+                st.plotly_chart(fig_hist, use_container_width=True)

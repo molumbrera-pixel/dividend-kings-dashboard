@@ -75,6 +75,10 @@ def score_stock(d):
         return "❌ Risk"
 
 # Cargar datos
+DIVIDEND_KINGS = [
+    "KO", "JNJ", "PG", "PEP", "MCD",
+    "LOW", "CL", "MMM", "ABBV", "TGT"
+]
 data = {}
 for ticker in DIVIDEND_KINGS:
     data[ticker] = get_data(ticker)

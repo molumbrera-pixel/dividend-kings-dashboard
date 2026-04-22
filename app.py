@@ -2,12 +2,16 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import math
 
 st.set_page_config(layout="wide", page_title="Dividend Kings PRO")
 
+# =========================
+# LISTA
+# =========================
 DIVIDEND_KINGS = [
     "AWR","ABM","ABBV","ALB","AOS","APD","ATO","BDX","BF-B","CAH",
     "CAT","CL","CINF","CLX","CMS","CVX","DOV","ED","EMR","FRT",
@@ -68,7 +72,6 @@ def fetch_ticker_data(ticker):
                 avg_price = hist["Close"].mean()
                 yield_hist = (yearly.mean() / avg_price) * 100
 
-        # 🔥 FIX REAL MOS
         if (
             yield_hist is not None and 
             yield_value is not None and 
@@ -188,25 +191,81 @@ df = clean_data(df)
 df["Score"] = df.apply(calculate_score, axis=1)
 df = df.sort_values("Score", ascending=False)
 
-# =========================
-# UI
-# =========================
 display_cols = [
     "Ticker","Sector","Price","Yield","Yield_Hist",
     "Margin_Safety","PE","Payout","Dist_Low","Drawdown","Score"
 ]
 
+# =========================
+# TABLA
+# =========================
+st.subheader("📊 Ranking")
 st.dataframe(df[display_cols], use_container_width=True)
+
+# =========================
+# CSV
+# =========================
+today = datetime.now().strftime("%Y-%m-%d")
+csv = df.to_csv(index=False).encode("utf-8")
+st.download_button("📥 Descargar CSV", csv, f"dividend_kings_{today}.csv")
 
 # =========================
 # TOP 5
 # =========================
 top5 = df.head()
-
 st.success(f"🚀 Top 5: {', '.join(top5['Ticker'].tolist())}")
 
-for _, row in top5.iterrows():
-    mos = row.get("Margin_Safety")
-    mos_str = f"{mos:.2f}" if mos and not math.isnan(mos) else "N/A"
+# =========================
+# DETALLE + GRAFICO PRO
+# =========================
+st.divider()
 
-    st.write(f"{row['Ticker']} → Score {row['Score']} | Yield {row['Yield']:.2f}% | MOS {mos_str}")
+ticker_sel = st.selectbox("Seleccionar acción", df["Ticker"])
+data = next((x for x in raw_data if x["Ticker"] == ticker_sel), None)
+
+if data:
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.metric("Precio", f"${data.get('Price',0):.2f}")
+        st.metric("Yield", f"{data.get('Yield',0):.2f}%")
+
+        payout = data.get("Payout")
+        st.write(f"Payout: {payout:.1%}" if payout else "N/A")
+
+        mos = data.get("Margin_Safety")
+        mos_str = f"{mos:.2f}" if mos and not math.isnan(mos) else "N/A"
+        st.write(f"Margin Safety: {mos_str}")
+
+        st.write(f"Sector: {data.get('Sector','N/A')}")
+
+    with col2:
+        hist = data.get("hist_df")
+
+        if hist is not None and not hist.empty:
+
+            df_plot = hist.copy()
+            df_plot["MA200"] = df_plot["Close"].rolling(200).mean()
+            df_plot["ATH"] = df_plot["Close"].cummax()
+            df_plot["Drawdown"] = (df_plot["Close"] - df_plot["ATH"]) / df_plot["ATH"] * 100
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Precio"))
+            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA200"], name="MA200", line=dict(dash="dash")))
+
+            fig.add_trace(go.Scatter(
+                x=df_plot.index,
+                y=df_plot["Drawdown"],
+                name="Drawdown %",
+                fill='tozeroy',
+                opacity=0.2,
+                yaxis="y2"
+            ))
+
+            fig.update_layout(
+                template="plotly_dark",
+                yaxis2=dict(overlaying='y', side='right', title="Drawdown %")
+            )
+
+            st.plotly_chart(fig, use_container_width=True)

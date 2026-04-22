@@ -19,50 +19,34 @@ DIVIDEND_KINGS = list(set([
     "MCD","MMM","PEP","PPG","RPM","SJW","SWK","TROW","WBA","WMT","XOM","NUE"
 ]))
 
-# =========================
-# FAST FETCH (SIEMPRE FUNCIONA)
-# =========================
 def fetch_fast_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="10y", progress=False)
+        time.sleep(0.2)
+
+        hist = yf.download(ticker, period="10y", progress=False)
 
         if hist.empty or len(hist) < 200:
+            print(f"{ticker} sin datos")
             return None
 
         price = hist["Close"].iloc[-1]
         low_52 = hist["Close"].tail(252).min()
         high_all = hist["Close"].max()
 
-        dividends = stock.dividends
-
-        yield_value = 0
-        yield_hist = None
-
-        if dividends is not None and not dividends.empty:
-            dividends.index = pd.to_datetime(dividends.index)
-
-            last_year = dividends[
-                dividends.index > (dividends.index[-1] - pd.DateOffset(years=1))
-            ]
-
-            yield_value = (last_year.sum() / price) * 100 if price > 0 else 0
-
         return {
             "Ticker": ticker,
             "Price": price,
-            "Yield": yield_value,
-            "Yield_Hist": yield_hist,
-            "Margin_Safety": None,
+            "Yield": 0,
             "PE": None,
             "Payout": None,
-            "Sector": "Loading...",
+            "Sector": "Unknown",
             "Drawdown": (price - high_all) / high_all * 100,
             "Dist_Low": (price - low_52) / low_52 * 100,
             "hist_df": hist
         }
 
-    except:
+    except Exception as e:
+        print(f"Error {ticker}: {e}")
         return None
 
 
